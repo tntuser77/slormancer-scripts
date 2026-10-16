@@ -107,10 +107,6 @@ RULES = [
     ("Upgrade", "rare", -40, False),
     ("Upgrade", "magic", -40, False),
     ("Attrition Battle", "", 50, False),  # +challenge duration
-    ("Curse", "war chest quantity", 40, False),  # removes other curses from the pool
-    ("Curse", "goldus", -60, True),  # enemy life scales with your Goldus
-    ("Curse", "reapersmith", -20, True),
-    ("Cursed Reward", "", -10, True),
     ("Nullifying Shield", "", -30, False),  # hard for this build: about -3 waves
     ("Overcrowding", "", -30, False),
     ("Ace Combat", "", -30, False),
@@ -126,6 +122,16 @@ RULES = [
     ('"Let. Them. Come."', "", 20, False),
     ('"Is That All?!"', "", 20, False),
 ]
+
+# --- Curses ---------------------------------------------------------------------
+# There are only 3 curses, and the reward on the curse card says which one:
+#   War Chest Quantity (small) -> enemy attack speed, the safest: take it
+#   Spirit                     -> big enemy damage boost
+#   Goldus                     -> huge enemy HP boost ("murders your computer")
+# Curse cards skip the rest-of-run penalty; these points replace the reward score.
+CURSE_CARDS = {"Cursed Reward", "Curse"}
+CURSE_BY_REWARD = {"War Chest Quantity": 60, "Spirit": -150, "Goldus Quantity": -300}
+CURSE_UNKNOWN_REWARD = -150
 
 # Per-goal tweaks on top of RULES: {goal: {challenge name: points}}.
 GOAL_OVERRIDES = {

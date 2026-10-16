@@ -161,7 +161,7 @@ def score_challenge(c, goal):
     elif is_siege_leader(c):
         c.score += s.SIEGE_LEADER_POINTS
         c.reasons.append(f"Siege Leader {s.SIEGE_LEADER_POINTS:+}")
-    elif c.duration == 0:
+    elif c.duration == 0 and not is_curse(c):
         c.score += s.REST_OF_RUN_CHALLENGE_POINTS
         c.reasons.append(f"challenge lasts the rest of the run {s.REST_OF_RUN_CHALLENGE_POINTS:+}")
         if c.name in s.ASK_IF_REST_OF_RUN:
@@ -184,10 +184,19 @@ def score_challenge(c, goal):
         c.ask.append("challenge not recognised")
 
 
+def is_curse(c):
+    return c.name in strategy.CURSE_CARDS or c.rarity == "Cursed"
+
+
 def score_reward(c, goal):
     """Reward part of the score. Basic rewards only break ties."""
     s = strategy
     reward = c.reward_type
+    if is_curse(c):  # the reward tells which curse it is
+        points = s.CURSE_BY_REWARD.get(reward, s.CURSE_UNKNOWN_REWARD)
+        c.score += points
+        c.reasons.append(f"curse with {reward} reward {points:+}")
+        return
     priority = s.REWARD_PRIORITY.get(goal, [])
     if reward in priority:
         rank = priority.index(reward)
@@ -488,7 +497,7 @@ def read_cards(game, goal, capture_dir=None):
         name, dist = match_icon(crops[c.index]["icon"])
         if not rare_plus and name is not None and dist < ICON_MATCH:
             c.reward_type = name
-        elif rare_plus or top - c.score < strategy.POINTS_PER_WAVE:
+        elif rare_plus or is_curse(c) or top - c.score < strategy.POINTS_PER_WAVE:
             reward, special, tooltip = read_reward(game, c.index)
             c.reward_type, c.special, c.hovered = reward, special, True
             if rare_plus and hasattr(game, "hwnd"):
