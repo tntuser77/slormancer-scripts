@@ -17,6 +17,16 @@ Automates picking challenges in The Slormancer's Great Forge.
 .venv\Scripts\python forge.py --image runs\pick_....png   # test on a saved screenshot
 ```
 
+## Full loop (forge_cycle.py)
+
+`forge_cycle.py --live --runs N` plays N forges back to back: picks cards to
+wave 100, opens the War Chest, picks up loot, sorts new items (keeps teal `!!`
+and `!!!` special stats, trashes the rest), takes the portal home, talks to
+Almerolis, starts The Great Forge at Wrath 10, places the 4 clones and presses
+L. Each step checks the screen first and stops with a screenshot in `runs/`
+if something isn't what it expects. `--step loot|sort|end|start` runs one part.
+Positions come from a recorded hand-played cycle (`record_demo.py`).
+
 ## How it decides
 
 1. Card name, rarity and duration (OCR, in parallel). Challenge names are matched against the game's own data files.

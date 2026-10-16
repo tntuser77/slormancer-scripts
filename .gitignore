@@ -29,7 +29,15 @@ debug/
 *.png
 !images/*.png
 !icons/*.png
+!templates/*.png
 
 # Forge run state and pick logs
 run_state.json
 runs/
+
+# Recorded demos (screenshots of play)
+demos/
+
+# Personal reference screenshots and scratch output
+references/
+demos_record.out

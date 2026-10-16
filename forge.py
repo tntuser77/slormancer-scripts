@@ -59,7 +59,7 @@ SCREEN_TITLE_BOX = (570, 140)
 SCREEN_TITLE_SIZE = (780, 90)
 CARD_REWARD_ICON = [(592, 728), (959, 728), (1327, 728)]  # hover here for the tooltip
 CARD_LEFT = [445, 813, 1181]  # tooltips open to the left of the card
-TOOLTIP_TOP, TOOLTIP_W, TOOLTIP_H = 400, 430, 400  # tall enough for effect text
+TOOLTIP_TOP, TOOLTIP_W, TOOLTIP_H = 330, 430, 560  # tall enough for long effect text (obelisks)
 
 # Reward names as the game's tooltips spell them (dat_str.json forge_random_*).
 REWARD_NAMES = ["Equipment Quality", "Slormite Quality", "Slormeline Quality",
@@ -142,6 +142,7 @@ class Challenge:
     reward_amount: int | None
     special: int | None = None  # War Chest effect ref from the game data
     hovered: bool = False  # reward was read from the tooltip
+    present: bool = True  # False for an empty slot (Cursed Path shows a single card)
     score: int = 0
     reasons: list = field(default_factory=list)  # how the score was built
     ask: list = field(default_factory=list)  # why you should pick this one yourself
@@ -152,9 +153,12 @@ def is_siege_leader(c):
     return bool(c.name) and c.name.startswith("The Siege Leader")
 
 
-def score_challenge(c, goal):
+def score_challenge(c, goal, wave=None):
     """Rarity/duration/challenge part of the score (no reward needed)."""
     s = strategy
+    if (c.name or "").startswith("Obelisk") and wave is not None and wave >= s.OBELISK_LAST_WAVE:
+        c.score += s.OBELISK_LATE_POINTS
+        c.reasons.append(f"obelisk at wave {wave}: too late {s.OBELISK_LATE_POINTS:+}")
     if c.duration:
         c.score += c.duration * s.POINTS_PER_WAVE
         c.reasons.append(f"{c.duration} waves +{c.duration * s.POINTS_PER_WAVE}")
@@ -218,8 +222,8 @@ def score_reward(c, goal):
         c.ask.append("reward not recognised")
 
 
-def score(c, goal):
-    score_challenge(c, goal)
+def score(c, goal, wave=None):
+    score_challenge(c, goal, wave)
     score_reward(c, goal)
 
 
@@ -310,7 +314,11 @@ class Game:
 
     def click(self, pos):
         x, y = self._scale(*pos)
-        pyautogui.click(self.left + x, self.top + y)
+        pyautogui.moveTo(self.left + x, self.top + y, duration=0.1)
+        time.sleep(0.1)
+        pyautogui.mouseDown()
+        time.sleep(0.08)
+        pyautogui.mouseUp()
 
     def looks_blank(self):
         return self.frame.convert("L").getextrema()[1] < 10
@@ -325,6 +333,28 @@ def ocr(img, config=""):
     # Upscaling helps tesseract a lot on small game text.
     img = img.resize((img.width * 2, img.height * 2), Image.LANCZOS)
     return tess.image_to_string(img, config=config).strip()
+
+
+WAVE_LABEL_BOX = (1730, 236)   # "Wave N" under the minimap (hidden on pick screens)
+WAVE_LABEL_SIZE = (110, 24)
+
+
+def read_wave(game):
+    """Wave number from the label under the minimap, or None."""
+    crop = game.crop(WAVE_LABEL_BOX, WAVE_LABEL_SIZE)
+    mask = Image.new("L", crop.size, 255)
+    mask.putdata([0 if min(p) > 190 else 255 for p in crop.get_flattened_data()])
+    digits = "".join(ch for ch in ocr(mask) if ch.isdigit())
+    return int(digits) if digits else None
+
+
+def note_wave(game):
+    """Remember the latest wave number (pick screens hide it)."""
+    if time.time() - getattr(game, "wave_read_at", 0) > 3:
+        game.wave_read_at = time.time()
+        wave = read_wave(game)
+        if wave is not None:
+            game.last_wave = wave
 
 
 def screen_heading(game):
@@ -422,6 +452,13 @@ def read_reward(game, i):
     game.refresh()
     tooltip = ocr(game.crop((max(0, CARD_LEFT[i] - TOOLTIP_W), TOOLTIP_TOP), (TOOLTIP_W, TOOLTIP_H)))
     lines = [l.strip() for l in tooltip.splitlines() if l.strip()]
+    # Allied-obelisk rewards share all their text except one phrase.
+    low = " ".join(tooltip.lower().split())
+    if "allied" in low:
+        for phrase, ref in [("war chest quantity", 39), ("war chest quality", 38),
+                            ("goldus quantity", 37), ("equipment quality", 40), ("spirit", 36)]:
+            if phrase in low.split("allied", 1)[1]:
+                return "Special", ref, tooltip
     # Effects first: their text can mention basic names ("War Chest Quality").
     ref, share = identify_special(tooltip)
     if share >= 0.8:
@@ -478,11 +515,12 @@ def read_cards(game, goal, capture_dir=None):
         duration, duration_text = durations[i].result()
         text = ocr(crops[i]["text"]) if needs_text(name) else ""
         c = Challenge(i, name, rarity, text, duration, "Unknown", None)
+        c.present = bool(raw_title.strip())
         if name is None:
             c.notes.append(f"title read as {raw_title!r}")
         if duration is None and not name_has_no_duration(name):
             c.notes.append(f"couldn't read duration: {duration_text!r}")
-        score_challenge(c, goal)
+        score_challenge(c, goal, getattr(game, "last_wave", None))
         cards.append(c)
 
     # Rewards. Rare+ cards can carry War Chest effects, which share one framed
@@ -491,8 +529,8 @@ def read_cards(game, goal, capture_dir=None):
     # icon that could break a duration tie.
     top = max(c.score for c in cards)
     for c in cards:
-        if (c.name or "").startswith("Upgrade"):
-            continue  # Upgrade cards have no reward
+        if not c.present or (c.name or "").startswith("Upgrade"):
+            continue  # empty slot / Upgrade cards have no reward
         rare_plus = c.rarity in EFFECT_RARITIES
         name, dist = match_icon(crops[c.index]["icon"])
         if not rare_plus and name is not None and dist < ICON_MATCH:
@@ -537,12 +575,15 @@ def show(cards):
 
 def decide(cards):
     """(best card, reasons to let you pick instead). Empty reasons = safe to click."""
-    ranked = sorted(cards, key=lambda c: c.score, reverse=True)
+    present = [c for c in cards if c.present] or cards
+    if len(present) == 1:
+        return present[0], []  # only one card on screen: nothing to decide
+    ranked = sorted(present, key=lambda c: c.score, reverse=True)
     best = ranked[0]
     # Only judgement calls that could matter: the best card, cards close to it,
     # and unreadable rewards (their real value is unknown).
     in_contention = lambda c: c is best or best.score - c.score < 2 * strategy.POINTS_PER_WAVE
-    ask = [f"card {c.index + 1}: {a}" for c in cards for a in c.ask
+    ask = [f"card {c.index + 1}: {a}" for c in present for a in c.ask
            if in_contention(c) or a == "reward not recognised"]
     if ranked[0].score - ranked[1].score < strategy.ASK_MARGIN:
         ask.append(f"top two within {strategy.ASK_MARGIN} points")
@@ -610,7 +651,7 @@ def handle_screen(game, args, heading, state):
     show(cards)
     print(f"(read + scored in {time.time() - t0:.1f}s)")
     best, ask = decide(cards)
-    if heading == "cursed" and "Cursed" in strategy.ASK_ON_RARITY:
+    if heading == "cursed" and "Cursed" in strategy.ASK_ON_RARITY and sum(c.present for c in cards) > 1:
         ask.append("Cursed Path screen")
     print(f"Best: card {best.index + 1} ({best.name or '???'})")
     if not args.live:
@@ -653,6 +694,7 @@ def handle_screen(game, args, heading, state):
 
 
 SAME_SCREEN_NOISE = 6  # per-card signature change below this = same cards
+MAX_RETRIES = 2
 RETRY_AFTER = 45  # seconds; longer than HUMAN_WAIT so judgement calls aren't cut short
 
 
@@ -705,23 +747,30 @@ def main():
     print(f"Run goal: {state['goal']} ({len(state['picks'])} picks so far)")
     handled = None  # card signature of the screen already dealt with
     handled_at = 0.0
-    picks = 0
+    picks = retries = 0
     while not stop_pressed():
         game.refresh()
         heading = screen_heading(game)
         if heading is None:
             handled = None
+            note_wave(game)
         else:
             sig = card_signature(game)
             new_screen = handled is None or cards_changed(sig, handled) > SAME_SCREEN_NOISE
             # Same cards still up long after a click: the click didn't land.
             retry = not new_screen and time.time() - handled_at > RETRY_AFTER
             if new_screen or retry:
+                retries = retries + 1 if retry else 0
+                if retries > MAX_RETRIES:
+                    log("same pick screen still up after retries - stopping")
+                    winsound.MessageBeep(winsound.MB_ICONHAND)
+                    raise SystemExit("Stopped: my clicks aren't changing this screen. Screenshot in runs/.")
                 if retry:
                     print("Same screen is still up - picking again.")
                 time.sleep(0.5)  # let the cards finish animating in
                 game.refresh()
-                picks += handle_screen(game, args, heading, state)
+                picked = handle_screen(game, args, heading, state)
+                picks += picked and not retry
                 handled, handled_at = card_signature(game), time.time()
                 if args.max_picks and picks >= args.max_picks:
                     print(f"Done: {picks} picks.")

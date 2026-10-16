@@ -25,7 +25,7 @@ LASTING_EXTRA = {13, 34}
 REWARD_PRIORITY = {
     "goldus": ["Goldus Quantity", "War Chest Quantity", "Slorm Quantity", "Equipment Quality"],
     "slorm": ["Slorm Quantity", "War Chest Quantity", "Equipment Quality"],
-    "slormite": ["Slormite Quality", "Slormeline Quality", "War Chest Quantity", "War Chest Quality"],
+    "slormite": ["War Chest Quantity", "Slormite Quality", "Slormeline Quality", "War Chest Quality"],  # quantity: quality has diminishing returns
     "spirits": ["Spirit", "War Chest Quantity"],
     "elder_slorm": ["Slorm Quantity", "War Chest Quantity"],
 }
@@ -46,7 +46,7 @@ SIEGE_LEADER_POINTS = 50
 # rest of the expedition (switches the goal if it feeds one resource); "now" =
 # one-off. First-pass ratings: adjust freely.
 SPECIAL_REWARDS = {
-    4: ("any", "good"),       # run: Chest Quantity becomes equal to Chest Quality
+    4: ("any", "great"),      # run: Chest Quantity becomes equal to Chest Quality (Quality is stacked)
     5: ("any", "good"),       # run: +Chest Quality per type of loot in the chest
     6: ("spirits", "ok"),     # now: every spirit type raised to the highest type's amount
     7: ("goldus", "great"),   # now: Goldus = X% of chest Slorm. Beats basic picks, not giga
@@ -57,7 +57,7 @@ SPECIAL_REWARDS = {
     12: ("slormite", "meh"),  # now: +Fragment Quality per Slormite/Slormeline
     13: ("elder_slorm", "giga"),  # run (at looting): X% of Slorm becomes Elder Slorm
     14: ("any", "ok"),        # now: Equipment Quality -> Chest Quality
-    15: ("any", "good"),      # now: Slorm Quantity -> Chest Quantity (strong late, guide)
+    15: ("any", "great"),     # now: Slorm Quantity -> Chest Quantity (strong late, guide; Quantity is king)
     16: ("goldus", "giga"),   # run: +Goldus Quantity per Elite kill
     17: ("goldus", "giga"),   # run: Goldus in chest increased every wave
     18: ("any", "good"),      # run: +Chest Quality every wave
@@ -78,21 +78,23 @@ SPECIAL_REWARDS = {
     33: ("any", "meh"),       # run: Equipment Quality per wave with a hostile Obelisk
     34: ("spirits", "giga"),  # run: following rewards are only spirits, but increased
     35: ("any", "good"),      # keep the chest's bonuses if you die (safety)
+    # Obelisk card rewards: destroy the obelisk (5-10 waves for this build) and
+    # it pays out every wave after. Only worth it before OBELISK_LAST_WAVE.
     36: ("any", "meh"),       # Allied Obelisk: spirits per wave
-    37: ("any", "ok"),        # Allied Obelisk: Goldus Quantity per wave
-    38: ("any", "ok"),        # Allied Obelisk: Chest Quality per wave
-    39: ("any", "ok"),        # Allied Obelisk: Chest Quantity per wave
+    37: ("goldus", "ok"),     # Allied Obelisk: Goldus Quantity per wave
+    38: ("any", "decent"),    # Allied Obelisk: Chest Quality per wave
+    39: ("any", "great"),     # Allied Obelisk: Chest Quantity per wave (beats a 5-wave card)
     40: ("any", "meh"),       # Allied Obelisk: Equipment Quality per wave
 }
 # Elder Slorm pays the forge entry fee and has a cap. How full you are (0-1,
 # check in-game and update): near the cap, the conversion effect barely matters.
-ELDER_SLORM_FILL = 0.70
+ELDER_SLORM_FILL = 1.0  # 177 303 / 177 303 seen on the expedition panel, 2026-10-16
 SPECIAL_REWARDS[13] = (
     "elder_slorm" if ELDER_SLORM_FILL < 0.5 else "any",  # "any" = never switches the goal
     "giga" if ELDER_SLORM_FILL < 0.3 else "good" if ELDER_SLORM_FILL < 0.8 else "meh",
 )
 
-TIER_POINTS = {"giga": 200, "great": 70, "good": 60, "ok": 20, "meh": 0}
+TIER_POINTS = {"giga": 200, "great": 70, "good": 60, "decent": 40, "ok": 20, "meh": 0}
 # Effects below "great" for a different goal than the current one get this share.
 OFF_GOAL_SHARE = 0.3
 # A special reward the script couldn't identify (logged with a screenshot).
@@ -102,8 +104,8 @@ UNKNOWN_SPECIAL_POINTS = 30
 # (challenge name, text it must contain or "", points, judgement call).
 # Names are matched against the game's own list, so spelling matters.
 RULES = [
-    ("Upgrade", "legendary", 60, False),
-    ("Upgrade", "epic", 50, False),
+    ("Upgrade", "legendary", 65, False),  # beats any 5-wave card
+    ("Upgrade", "epic", 60, False),  # beats any 5-wave card
     ("Upgrade", "rare", -40, False),
     ("Upgrade", "magic", -40, False),
     ("Attrition Battle", "", 50, False),  # +challenge duration
@@ -111,16 +113,12 @@ RULES = [
     ("Overcrowding", "", -30, False),
     ("Ace Combat", "", -30, False),
     ("Highlander", "", -30, False),
-    ("Obelisk of Transmutation", "", -30, False),
-    ("Obelisk of Destruction", "", -30, False),
-    ("Obelisk of Illusion", "", -30, False),
-    ("Obelisk of Annihilation", "", -30, False),
-    ("Obelisk of Revocation", "", -30, False),
-    # Gates: the guide says opening 6 speeds runs up.
-    ('"Set up the Barricades!"', "", 20, False),
-    ('"Open the Gates!"', "", 20, False),
-    ('"Let. Them. Come."', "", 20, False),
-    ('"Is That All?!"', "", 20, False),
+    # Gates (first pick of a run, costs Elder Slorm): always 6 gates.
+    # "Let. Them. Come." = 6 locations; the others are 2, 4 or +1.
+    ('"Let. Them. Come."', "", 500, False),
+    ('"Set up the Barricades!"', "", 0, False),
+    ('"Open the Gates!"', "", 0, False),
+    ('"Is That All?!"', "", 0, False),
 ]
 
 # --- Curses ---------------------------------------------------------------------
@@ -132,6 +130,11 @@ RULES = [
 CURSE_CARDS = {"Cursed Reward", "Curse"}
 CURSE_BY_REWARD = {"War Chest Quantity": 60, "Spirit": -150, "Goldus Quantity": -300}
 CURSE_UNKNOWN_REWARD = -150
+
+# Obelisk challenges are fine for this build (turrets handle them), but an
+# obelisk taken late doesn't have enough waves left to pay out.
+OBELISK_LAST_WAVE = 85
+OBELISK_LATE_POINTS = -50
 
 # Per-goal tweaks on top of RULES: {goal: {challenge name: points}}.
 GOAL_OVERRIDES = {
