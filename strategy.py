@@ -1,0 +1,148 @@
+"""How forge.py scores cards. Reloaded before every pick, so edit it mid-run.
+
+Based on the "Manipulating The Forge" v1.0 summary:
+  - pick the challenge with the most waves (removes it from the pool)
+  - prioritise: next challenge Epic/Legendary, +challenge duration,
+    War Chest Quantity curse, Slorm conversion rewards
+  - avoid: next challenge Magic/Rare, non-duration challenges, obelisks
+Plus (Elijah):
+  - an effect that lasts the rest of the expedition for one resource switches
+    the run's goal to that resource; one-off "you immediately..." effects don't
+  - challenges that last the rest of the forge are actively bad, unless the
+    reward is a strong rest-of-run effect
+"""
+
+# What you're farming at the start of a run: "goldus", "slorm", "slormite",
+# "spirits" or "elder_slorm". A rest-of-run effect can switch it mid-run.
+GOAL = "slormite"
+SWITCH_ON_LASTING = True
+# Effects that last the whole run without saying "for the rest of the
+# Expedition" (that wording is detected from the game data automatically).
+LASTING_EXTRA = {13, 34}
+
+# Reward preference per goal, best first. Names are the game's tooltip names
+# (REWARD_NAMES in forge.py). "Spirit" covers every Reapersmith Spirit type.
+REWARD_PRIORITY = {
+    "goldus": ["Goldus Quantity", "War Chest Quantity", "Slorm Quantity", "Equipment Quality"],
+    "slorm": ["Slorm Quantity", "War Chest Quantity", "Equipment Quality"],
+    "slormite": ["Slormite Quality", "Slormeline Quality", "War Chest Quantity", "War Chest Quality"],
+    "spirits": ["Spirit", "War Chest Quantity"],
+    "elder_slorm": ["Slorm Quantity", "War Chest Quantity"],
+}
+# Points for 1st, 2nd, 3rd... entry of the goal's list. Anything unlisted gets 0.
+# Kept below POINTS_PER_WAVE so reward only breaks ties between equal durations.
+REWARD_POINTS = [4, 3, 2, 1]
+
+# Each wave of duration is worth this much. Duration comes first (guide).
+POINTS_PER_WAVE = 10
+# Challenges lasting the rest of the forge: worse than any normal reward is good.
+REST_OF_RUN_CHALLENGE_POINTS = -40
+# Siege Leader challenges are fine against Normal/Magic rewards: score them like
+# a 5-wave challenge instead of the rest-of-run penalty.
+SIEGE_LEADER_POINTS = 50
+
+# --- Special War Chest effects (Epic/Legendary rewards) ----------------------
+# Game ref (dat_for.json) -> (goal it feeds or "any", tier). "run" = lasts the
+# rest of the expedition (switches the goal if it feeds one resource); "now" =
+# one-off. First-pass ratings: adjust freely.
+SPECIAL_REWARDS = {
+    4: ("any", "good"),       # run: Chest Quantity becomes equal to Chest Quality
+    5: ("any", "good"),       # run: +Chest Quality per type of loot in the chest
+    6: ("spirits", "ok"),     # now: every spirit type raised to the highest type's amount
+    7: ("goldus", "great"),   # now: Goldus = X% of chest Slorm. Beats basic picks, not giga
+    8: ("slorm", "ok"),       # now: +Slorm per Reapersmith Spirit in the chest
+    9: ("any", "ok"),         # now: +Equipment Quality per Equipment in the chest
+    10: ("slormite", "ok"),   # now: +Slormite Quality per Slormite in the chest
+    11: ("slormite", "ok"),   # now: +Slormeline Quality per Slormeline in the chest
+    12: ("slormite", "meh"),  # now: +Fragment Quality per Slormite/Slormeline
+    13: ("elder_slorm", "giga"),  # run (at looting): X% of Slorm becomes Elder Slorm
+    14: ("any", "ok"),        # now: Equipment Quality -> Chest Quality
+    15: ("any", "good"),      # now: Slorm Quantity -> Chest Quantity (strong late, guide)
+    16: ("goldus", "giga"),   # run: +Goldus Quantity per Elite kill
+    17: ("goldus", "giga"),   # run: Goldus in chest increased every wave
+    18: ("any", "good"),      # run: +Chest Quality every wave
+    19: ("any", "giga"),      # run: +Chest Quantity every wave
+    20: ("spirits", "giga"),  # run: chance per kill to add spirits
+    21: ("any", "good"),      # run: Normal challenge rewards increased
+    22: ("spirits", "giga"),  # run: rewards increased while holding every spirit type
+    23: ("goldus", "ok"),     # now: all Quality bonuses -> Goldus Quantity
+    24: ("slormite", "ok"),   # now: Slorm + Goldus Quantity -> Slormeline Quality
+    25: ("spirits", "ok"),    # now: every spirit += Slorm Quantity
+    26: ("spirits", "meh"),   # now: convert spirits to your reaper's type
+    27: ("spirits", "meh"),   # now: convert spirits to your most common type
+    28: ("goldus", "ok"),     # now: spirits -> Goldus
+    29: ("spirits", "meh"),   # now: every spirit += Fragment Quality
+    30: ("any", "good"),      # now: all loot increased by current Chest Quality
+    31: ("any", "meh"),       # spirits per Allied Obelisk each wave
+    32: ("any", "meh"),       # run: Allied Obelisk rewards increased
+    33: ("any", "meh"),       # run: Equipment Quality per wave with a hostile Obelisk
+    34: ("spirits", "giga"),  # run: following rewards are only spirits, but increased
+    35: ("any", "good"),      # keep the chest's bonuses if you die (safety)
+    36: ("any", "meh"),       # Allied Obelisk: spirits per wave
+    37: ("any", "ok"),        # Allied Obelisk: Goldus Quantity per wave
+    38: ("any", "ok"),        # Allied Obelisk: Chest Quality per wave
+    39: ("any", "ok"),        # Allied Obelisk: Chest Quantity per wave
+    40: ("any", "meh"),       # Allied Obelisk: Equipment Quality per wave
+}
+# Elder Slorm pays the forge entry fee and has a cap. How full you are (0-1,
+# check in-game and update): near the cap, the conversion effect barely matters.
+ELDER_SLORM_FILL = 0.70
+SPECIAL_REWARDS[13] = (
+    "elder_slorm" if ELDER_SLORM_FILL < 0.5 else "any",  # "any" = never switches the goal
+    "giga" if ELDER_SLORM_FILL < 0.3 else "good" if ELDER_SLORM_FILL < 0.8 else "meh",
+)
+
+TIER_POINTS = {"giga": 200, "great": 70, "good": 60, "ok": 20, "meh": 0}
+# Effects below "great" for a different goal than the current one get this share.
+OFF_GOAL_SHARE = 0.3
+# A special reward the script couldn't identify (logged with a screenshot).
+UNKNOWN_SPECIAL_POINTS = 30
+
+# --- Challenge rules -----------------------------------------------------------
+# (challenge name, text it must contain or "", points, judgement call).
+# Names are matched against the game's own list, so spelling matters.
+RULES = [
+    ("Upgrade", "legendary", 60, False),
+    ("Upgrade", "epic", 50, False),
+    ("Upgrade", "rare", -40, False),
+    ("Upgrade", "magic", -40, False),
+    ("Attrition Battle", "", 50, False),  # +challenge duration
+    ("Curse", "war chest quantity", 40, False),  # removes other curses from the pool
+    ("Curse", "goldus", -60, True),  # enemy life scales with your Goldus
+    ("Curse", "reapersmith", -20, True),
+    ("Cursed Reward", "", -10, True),
+    ("Nullifying Shield", "", -30, False),  # hard for this build: about -3 waves
+    ("Overcrowding", "", -30, False),
+    ("Ace Combat", "", -30, False),
+    ("Highlander", "", -30, False),
+    ("Obelisk of Transmutation", "", -30, False),
+    ("Obelisk of Destruction", "", -30, False),
+    ("Obelisk of Illusion", "", -30, False),
+    ("Obelisk of Annihilation", "", -30, False),
+    ("Obelisk of Revocation", "", -30, False),
+    # Gates: the guide says opening 6 speeds runs up.
+    ('"Set up the Barricades!"', "", 20, False),
+    ('"Open the Gates!"', "", 20, False),
+    ('"Let. Them. Come."', "", 20, False),
+    ('"Is That All?!"', "", 20, False),
+]
+
+# Per-goal tweaks on top of RULES: {goal: {challenge name: points}}.
+GOAL_OVERRIDES = {
+    "spirits": {name: 0 for name, *_ in RULES if name.startswith("Obelisk")},
+}
+
+# --- When to hand the pick to a human --------------------------------------------
+# Judgement calls: these rarities, flagged RULES, unrecognised cards, and top
+# two scores closer than ASK_MARGIN (0 = never). The script beeps and waits
+# HUMAN_WAIT seconds for you to pick; if the screen is still up after that it
+# picks the best card itself. 0 = never wait.
+ASK_ON_RARITY = {"Epic", "Legendary", "Cursed"}
+ASK_ON_UNKNOWN = True
+ASK_MARGIN = 0
+HUMAN_WAIT = 30
+# Rest-of-run versions of these are a judgement call (you might skip them).
+ASK_IF_REST_OF_RUN = {"Nullifying Shield"}
+
+# Reading reward amounts costs time and nothing uses them yet.
+READ_AMOUNTS = False
