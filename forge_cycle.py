@@ -403,8 +403,21 @@ def place_clones(game):
     os.makedirs(forge.LOG_DIR, exist_ok=True)
     game.refresh()
     game.frame.save(os.path.join(forge.LOG_DIR, f"clones_{time.strftime('%Y%m%d_%H%M%S')}.png"))
-    print("Starting the forge (L).")
-    tap("l")
+    press_start(game)
+
+
+def press_start(game):
+    """L opens the gate screen; L again closes it. Press once, wait, retry once."""
+    for _ in range(2):
+        print("Starting the forge (L).")
+        tap("l")
+        end = time.time() + 6
+        while time.time() < end:
+            game.refresh()
+            if forge.screen_heading(game):
+                return
+            time.sleep(0.5)
+    raise StepFailed("the gate screen didn't open after pressing L")
 
 
 def end_run(game):
@@ -478,9 +491,8 @@ def main():
         for run in range(args.runs):
             state = forge.load_state(new_run=True)
             print(f"=== Forge {run + 1}/{args.runs}: waves")
-            if forge.read_wave(game) == 0 and forge.screen_heading(game) is None:
-                print("At wave 0 - starting the forge (L).")
-                tap("l")
+            if run == 0 and forge.read_wave(game) == 0 and forge.screen_heading(game) is None:
+                press_start(game)  # later runs were already started by start_run()
             play_waves(game, args, state)
             forge.log("wave 100 done - ending run")
             end_run(game)

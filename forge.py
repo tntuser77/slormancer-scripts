@@ -117,11 +117,19 @@ def lasts_whole_run(ref):
 
 
 def identify_special(text):
-    """(ref, share of the effect's words found in text) for the best match."""
+    """(ref, share of the effect's words found in text) for the best match.
+
+    Among near-complete matches, the effect with the most matched words wins:
+    a short text (#14 "...Equipment Quality into War Chest Quality") is fully
+    contained in a longer one (#23 "...Equipment Quality, Slormite Quality...
+    into Goldus Quantity").
+    """
     found = set(words(text))
-    best = max(SPECIAL_REWARDS.items(), key=lambda kv: sum(w in found for w in kv[1]) / len(kv[1]))
-    ref, template = best
-    return ref, sum(w in found for w in template) / len(template)
+    scored = [(sum(w in found for w in t) / len(t), sum(w in found for w in t), ref)
+              for ref, t in SPECIAL_REWARDS.items()]
+    top = max(s for s, _, _ in scored)
+    share, _, ref = max((s, n, r) for s, n, r in scored if s >= top - 0.1 and s >= 0.8)         if top >= 0.8 else max(scored)
+    return ref, share
 
 
 def identify(ocr_name):
@@ -165,7 +173,7 @@ def score_challenge(c, goal, wave=None):
     elif is_siege_leader(c):
         c.score += s.SIEGE_LEADER_POINTS
         c.reasons.append(f"Siege Leader {s.SIEGE_LEADER_POINTS:+}")
-    elif c.duration == 0 and not is_curse(c):
+    elif c.duration == 0 and not is_curse(c) and c.name not in s.NO_REST_OF_RUN_PENALTY:
         c.score += s.REST_OF_RUN_CHALLENGE_POINTS
         c.reasons.append(f"challenge lasts the rest of the run {s.REST_OF_RUN_CHALLENGE_POINTS:+}")
         if c.name in s.ASK_IF_REST_OF_RUN:
@@ -201,6 +209,9 @@ def score_reward(c, goal):
         c.score += points
         c.reasons.append(f"curse with {reward} reward {points:+}")
         return
+    if reward in s.REWARD_BONUS:
+        c.score += s.REWARD_BONUS[reward]
+        c.reasons.append(f"{reward} {s.REWARD_BONUS[reward]:+}")
     priority = s.REWARD_PRIORITY.get(goal, [])
     if reward in priority:
         rank = priority.index(reward)
@@ -210,7 +221,7 @@ def score_reward(c, goal):
     elif c.special is not None:
         feeds, tier = s.SPECIAL_REWARDS.get(c.special, ("any", "meh"))
         points = s.TIER_POINTS[tier]
-        if tier not in ("giga", "great") and feeds not in ("any", goal):
+        if tier not in ("giga", "quantity", "great") and feeds not in ("any", goal):
             points = round(points * s.OFF_GOAL_SHARE)
         c.score += points
         span = "rest of run" if lasts_whole_run(c.special) else "one-off"
@@ -450,7 +461,8 @@ def read_reward(game, i):
     pyautogui.moveTo(game.left + x, game.top + y)
     time.sleep(0.4)
     game.refresh()
-    tooltip = ocr(game.crop((max(0, CARD_LEFT[i] - TOOLTIP_W), TOOLTIP_TOP), (TOOLTIP_W, TOOLTIP_H)))
+    x0 = max(0, CARD_LEFT[i] - TOOLTIP_W)
+    tooltip = ocr(game.crop((x0, TOOLTIP_TOP), (CARD_LEFT[i] + 120 - x0, TOOLTIP_H)))
     lines = [l.strip() for l in tooltip.splitlines() if l.strip()]
     # Allied-obelisk rewards share all their text except one phrase.
     low = " ".join(tooltip.lower().split())
@@ -467,7 +479,7 @@ def read_reward(game, i):
         match = difflib.get_close_matches(line, REWARD_NAMES, n=1, cutoff=0.8)
         if match:
             return match[0], None, tooltip
-    if any("spirit" in l.lower() for l in lines[:2]):
+    if any(l.lower().startswith("spirit of") or l.lower() == "reapersmith spirit" for l in lines)             or "spirit of " in " ".join(tooltip.lower().split()):
         return "Spirit", None, tooltip
     return ("Special" if "war chest effect" in tooltip.lower() else "Unknown"), None, tooltip
 
@@ -494,7 +506,7 @@ def needs_text(name):
     return any(n == name and contains for n, contains, *_ in strategy.RULES)
 
 
-def read_cards(game, goal, capture_dir=None):
+def read_cards(game, goal, capture_dir=None, heading=None):
     """Read the 3 cards: rarity/name/duration first, rewards only where they matter."""
     # Crop everything from one frame first: hovering changes game.frame.
     crops = [{"title": game.crop(CARD_TITLE_BOX[i], TITLE_SIZE),
@@ -516,6 +528,12 @@ def read_cards(game, goal, capture_dir=None):
         text = ocr(crops[i]["text"]) if needs_text(name) else ""
         c = Challenge(i, name, rarity, text, duration, "Unknown", None)
         c.present = bool(raw_title.strip())
+        if heading == "cursed":
+            # One card in the middle; the background behind the empty side
+            # slots OCRs as text and was clicked instead (stuck 18:25-19:04).
+            c.present = i == 1
+        if (name or "").startswith('"'):
+            c.duration = None  # gate cards: the "duration" area is the Elder Slorm bar
         if name is None:
             c.notes.append(f"title read as {raw_title!r}")
         if duration is None and not name_has_no_duration(name):
@@ -529,8 +547,8 @@ def read_cards(game, goal, capture_dir=None):
     # icon that could break a duration tie.
     top = max(c.score for c in cards)
     for c in cards:
-        if not c.present or (c.name or "").startswith("Upgrade"):
-            continue  # empty slot / Upgrade cards have no reward
+        if not c.present or (c.name or "").startswith(("Upgrade", '"')):
+            continue  # empty slot / Upgrade and gate cards have no reward
         rare_plus = c.rarity in EFFECT_RARITIES
         name, dist = match_icon(crops[c.index]["icon"])
         if not rare_plus and name is not None and dist < ICON_MATCH:
@@ -617,17 +635,36 @@ def log(line):
         f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {line}\n")
 
 
+VK_LBUTTON = 0x01
+
+
+def clicked_card(game, x):
+    """Index of the card whose column holds screen x, or None."""
+    gx = (x - game.left) / game.sx
+    i = min(range(3), key=lambda i: abs(CARD_CLICK[i][0] - gx))
+    return i if abs(CARD_CLICK[i][0] - gx) < 180 else None
+
+
 def wait_for_human(game, seconds):
-    """True if the pick screen went away (someone picked) within `seconds`."""
+    """(picked, card index) - picked if the pick screen went away within
+    `seconds`; the card is the last one left-clicked during the wait, if any."""
+    user32.GetAsyncKeyState(VK_LBUTTON)  # clear the "pressed since last call" bit
+    next_check = time.time() + 1
     end = time.time() + seconds
+    card = None
     while time.time() < end:
         if stop_pressed():
             raise SystemExit("Stopped.")
-        time.sleep(1)
-        game.refresh()
-        if screen_heading(game) is None:
-            return True
-    return False
+        if user32.GetAsyncKeyState(VK_LBUTTON) & 0x8001:
+            pos = pyautogui.position()
+            card = clicked_card(game, pos.x)
+        if time.time() >= next_check:
+            next_check = time.time() + 1
+            game.refresh()
+            if screen_heading(game) is None:
+                return True, card
+        time.sleep(0.03)
+    return False, card
 
 
 def handle_screen(game, args, heading, state):
@@ -647,12 +684,10 @@ def handle_screen(game, args, heading, state):
         pyautogui.moveTo(game.left + game.width // 2, game.top + 40)
         time.sleep(0.15)
         game.refresh()
-    cards = read_cards(game, goal, capture_dir)
+    cards = read_cards(game, goal, capture_dir, heading)
     show(cards)
     print(f"(read + scored in {time.time() - t0:.1f}s)")
     best, ask = decide(cards)
-    if heading == "cursed" and "Cursed" in strategy.ASK_ON_RARITY and sum(c.present for c in cards) > 1:
-        ask.append("Cursed Path screen")
     print(f"Best: card {best.index + 1} ({best.name or '???'})")
     if not args.live:
         if ask:
@@ -666,15 +701,19 @@ def handle_screen(game, args, heading, state):
     if ask:
         print(f"Judgement call ({'; '.join(ask)}) - waiting {strategy.HUMAN_WAIT}s for you to pick.")
         winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
-        if strategy.HUMAN_WAIT and wait_for_human(game, strategy.HUMAN_WAIT):
-            print("You picked.")
-            log(f"goal={goal} {summary} -> picked by hand ({'; '.join(ask)})")
-            state["picks"].append({"by": "hand", "cards": summary})
+        picked, card = wait_for_human(game, strategy.HUMAN_WAIT) if strategy.HUMAN_WAIT else (False, None)
+        if picked:
+            which = "?" if card is None else str(card + 1)
+            print(f"You picked card {which}.")
+            log(f"goal={goal} {summary} -> card {which} by hand, script said {best.index + 1} ({'; '.join(ask)})")
+            state["picks"].append({"by": "hand", "card": card + 1 if card is not None else None,
+                                   "script": best.index + 1, "cards": summary})
             state["last_pick"] = time.time()
             save_state(state)
             return True
         game.refresh()
         if screen_heading(game) is None:
+            log(f"goal={goal} {summary} -> screen closed right after the wait, nothing clicked")
             return True
 
     game.click(CARD_CLICK[best.index])
